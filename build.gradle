@@ -1,6 +1,13 @@
 plugins {
     id 'java'
+    id 'application'
 }
+
+application {
+    mainClass = 'org.yymjr.Main'
+}
+
+//applicationDefaultJvmArgs = ['-Xmx512m', '-XX:+HeapDumpOnOutOfMemoryError']
 
 group 'org.yymjr'
 version '1.0-SNAPSHOT'
@@ -12,6 +19,12 @@ repositories {
 dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.8.1'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.8.1'
+    implementation("com.squareup.okio:okio:3.3.0")
+    // https://mvnrepository.com/artifact/org.openjdk.jmh/jmh-core
+    implementation group: 'org.openjdk.jmh', name: 'jmh-core', version: '1.35'
+    // https://mvnrepository.com/artifact/org.openjdk.jmh/jmh-generator-annprocess
+    annotationProcessor('org.openjdk.jmh:jmh-generator-annprocess:1.35')
+    implementation 'com.alibaba.fastjson2:fastjson2:2.0.24'
 }
 
 test {

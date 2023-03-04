@@ -2,19 +2,24 @@ package org.yymjr.util;
 
 import sun.misc.Unsafe;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class JsonKit {
-    private static final byte[] nc = {'n', 'l', 'l'};
+    private static final byte[] nc = {'u', 'l', 'l'};
     private static final byte[] tc = {'r', 'u', 'e'};
     private static final byte[] fc = {'a', 'l', 's', 'e'};
     static final byte LATIN1 = 0;
     static final byte UTF16 = 1;
-    public static final Unsafe UNSAFE;
+    private static final Unsafe UNSAFE;
     private static long FIELD_STRING_VALUE_OFFSET;
     private static long FIELD_STRING_CODER_OFFSET;
+    private static MethodHandle hasNegatives;
+    private static MethodHandle getChar;
 
     static {
         Unsafe unsafe = null;
@@ -26,6 +31,16 @@ public final class JsonKit {
             FIELD_STRING_VALUE_OFFSET = unsafe.objectFieldOffset(field);
             field = String.class.getDeclaredField("coder");
             FIELD_STRING_CODER_OFFSET = unsafe.objectFieldOffset(field);
+            field = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
+            long fieldImplLookUpOffset = unsafe.staticFieldOffset(field);
+            MethodHandles.Lookup implLoopUp = (MethodHandles.Lookup)
+                    unsafe.getObject(MethodHandles.Lookup.class, fieldImplLookUpOffset);
+            Class<?> StringCodingClazz = Class.forName("java.lang.StringCoding");
+            hasNegatives = implLoopUp.findStatic(StringCodingClazz, "hasNegatives",
+                    MethodType.methodType(boolean.class, byte[].class, int.class, int.class));
+            Class<?> StringUTF16Clazz = Class.forName("java.lang.StringUTF16");
+            getChar = implLoopUp.findStatic(StringUTF16Clazz, "getChar",
+                    MethodType.methodType(char.class, byte[].class, int.class));
         } catch (Throwable ignored) {
         }
         UNSAFE = unsafe;
@@ -34,28 +49,43 @@ public final class JsonKit {
     public static Map<String, Object> toJsonObject(String src) {
         byte[] value = (byte[]) UNSAFE.getObject(src, FIELD_STRING_VALUE_OFFSET);
         byte codec = UNSAFE.getByte(src, FIELD_STRING_CODER_OFFSET);
-        final List<Token> tokens = new ArrayList<>(1 << 6);
-        /*LATIN1编码无需处理,UTF16转换成UTF8*/
         if (codec == UTF16) {
-            value = src.getBytes(StandardCharsets.UTF_8);
+            byte[] utf8Val;
+            int dp;
+            try {
+                utf8Val = new byte[(value.length >> 1) * 3];
+                dp = encodeUTF8_UTF16(value, utf8Val);
+            } catch (Throwable ignored) {
+                utf8Val = src.getBytes(StandardCharsets.UTF_8);
+                dp = utf8Val.length;
+            }
+            return toJsonObject(utf8Val, codec, dp);
+        } else if (codec == LATIN1) {
+            return toJsonObject(value, codec, value.length);
+        } else {
+            throw new IllegalArgumentException();
         }
-        for (int i = 0, length = value.length; i < length; i++) {
+    }
+
+    public static Map<String, Object> toJsonObject(byte[] value, byte codec, int length) {
+        final List<Token> tokens = new LinkedList<>();
+        for (int i = 0; i < length; i++) {
             byte code = value[i];
             if (isWhiteSpace(code)) {
                 continue;
             }
 
             switch (code) {
-                case '{' -> tokens.add(new Token(TokenType.BEGIN_OBJECT, "{"));
-                case '}' -> tokens.add(new Token(TokenType.END_OBJECT, "}"));
-                case '[' -> tokens.add(new Token(TokenType.BEGIN_ARRAY, "["));
-                case ']' -> tokens.add(new Token(TokenType.END_ARRAY, "]"));
-                case ',' -> tokens.add(new Token(TokenType.SEP_COMMA, ","));
-                case ':' -> tokens.add(new Token(TokenType.SEP_COLON, ":"));
+                case '{' -> tokens.add(staticTokenHolder.BEGIN_OBJECT_TOKEN);
+                case '}' -> tokens.add(staticTokenHolder.END_OBJECT_TOKEN);
+                case '[' -> tokens.add(staticTokenHolder.BEGIN_ARRAY_TOKEN);
+                case ']' -> tokens.add(staticTokenHolder.END_ARRAY_TOKEN);
+                case ',' -> tokens.add(staticTokenHolder.SEP_COMMA_TOKEN);
+                case ':' -> tokens.add(staticTokenHolder.SEP_COLON_TOKEN);
                 case 'n' -> {
                     if (compareWith(nc, value, i)) {
                         i += nc.length;
-                        tokens.add(new Token(TokenType.NULL, "null"));
+                        tokens.add(staticTokenHolder.NULL_TOKEN);
                         break;
                     }
                     throw new RuntimeException("Invalid json string");
@@ -63,7 +93,7 @@ public final class JsonKit {
                 case 't' -> {
                     if (compareWith(tc, value, i)) {
                         i += tc.length;
-                        tokens.add(new Token(TokenType.BOOLEAN, "true"));
+                        tokens.add(staticTokenHolder.BOOLEAN_TRUE_TOKEN);
                         break;
                     }
                     throw new RuntimeException("Invalid json string");
@@ -71,7 +101,7 @@ public final class JsonKit {
                 case 'f' -> {
                     if (compareWith(fc, value, i)) {
                         i += fc.length;
-                        tokens.add(new Token(TokenType.BOOLEAN, "false"));
+                        tokens.add(staticTokenHolder.BOOLEAN_FALSE_TOKEN);
                         break;
                     }
                     throw new RuntimeException("Invalid json string");
@@ -110,11 +140,15 @@ public final class JsonKit {
                             code = value[++i];
                             if (code == ',') {
                                 tokens.add(new Token(TokenType.NUMBER, quickCreateString(value, offset, i, codec)));
-                                tokens.add(new Token(TokenType.SEP_COMMA, ","));
+                                tokens.add(staticTokenHolder.SEP_COMMA_TOKEN);
                                 break;
                             } else if (code == '}') {
                                 tokens.add(new Token(TokenType.NUMBER, quickCreateString(value, offset, i, codec)));
-                                tokens.add(new Token(TokenType.END_OBJECT, "}"));
+                                tokens.add(staticTokenHolder.END_OBJECT_TOKEN);
+                                break;
+                            } else if (code == ']') {
+                                tokens.add(new Token(TokenType.NUMBER, quickCreateString(value, offset, i, codec)));
+                                tokens.add(staticTokenHolder.END_ARRAY_TOKEN);
                                 break;
                             }
                         }
@@ -128,7 +162,7 @@ public final class JsonKit {
         Iterator<Token> tokenIterator = tokens.iterator();
         Token token = tokenIterator.next();
         if (token.tokenType() == TokenType.BEGIN_OBJECT) {
-            return parseJsonObject(tokenIterator, tokens);
+            return parseJsonObject(tokenIterator);
         }
         throw new RuntimeException("Parse error, invalid Token.");
     }
@@ -136,22 +170,38 @@ public final class JsonKit {
     private static String quickCreateString(byte[] value, int from, int to, byte coder) {
         try {
             if (coder == LATIN1) {
+                byte[] copy = Arrays.copyOfRange(value, from, to);
                 String dst = (String) UNSAFE.allocateInstance(String.class);
-                UNSAFE.putObject(dst, FIELD_STRING_VALUE_OFFSET, Arrays.copyOfRange(value, from, to));
-                UNSAFE.putByte(dst, FIELD_STRING_CODER_OFFSET, coder);
+                UNSAFE.putObject(dst, FIELD_STRING_VALUE_OFFSET, copy);
+                UNSAFE.putByte(dst, FIELD_STRING_CODER_OFFSET, LATIN1);
                 return dst;
             } else if (coder == UTF16) {
+                if (!(boolean) hasNegatives.invoke(value, from, to - from)) {
+                    byte[] copy = Arrays.copyOfRange(value, from, to);
+                    String dst = (String) UNSAFE.allocateInstance(String.class);
+                    UNSAFE.putObject(dst, FIELD_STRING_VALUE_OFFSET, copy);
+                    UNSAFE.putByte(dst, FIELD_STRING_CODER_OFFSET, LATIN1);
+                    return dst;
+                }
                 return new String(value, from, to - from, StandardCharsets.UTF_8);
             }
-        } catch (InstantiationException ignored) {
+        } catch (Throwable ignored) {
         }
         return new String(value, from, to - from);
     }
 
-    private static Map<String, Object> parseJsonObject(Iterator<Token> tokenIterator, List<Token> tokens) {
-        final Map<String, Object> jsonObject = new HashMap<>();
+    /**
+     * The <p>previousToken</p> must be {@link staticTokenHolder#BEGIN_OBJECT_TOKEN }
+     * when parse JsonObject.
+     *
+     * @param tokenIterator iterator of tokens
+     * @return jsonObject
+     */
+    private static Map<String, Object> parseJsonObject(Iterator<Token> tokenIterator) {
+        final LinkedHashMap<String, Object> jsonObject = new LinkedHashMap<>();
         int expectToken = TokenType.STRING.getTokenCode() | TokenType.END_OBJECT.getTokenCode();
         String key = null;
+        Token previousToken = staticTokenHolder.BEGIN_OBJECT_TOKEN;
         while (tokenIterator.hasNext()) {
             Token token = tokenIterator.next();
             TokenType tokenType = token.tokenType();
@@ -159,7 +209,7 @@ public final class JsonKit {
             switch (tokenType) {
                 case BEGIN_OBJECT -> {
                     checkExpectToken(tokenType, expectToken);
-                    jsonObject.put(key, parseJsonObject(tokenIterator, tokens));
+                    jsonObject.put(key, parseJsonObject(tokenIterator));
                     expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_OBJECT.getTokenCode();
                 }
                 case END_OBJECT, END_DOCUMENT -> {
@@ -168,7 +218,7 @@ public final class JsonKit {
                 }
                 case BEGIN_ARRAY -> {
                     checkExpectToken(tokenType, expectToken);
-                    jsonObject.put(key, parseJsonArray(tokenIterator, tokens));
+                    jsonObject.put(key, parseJsonArray(tokenIterator));
                     expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_OBJECT.getTokenCode();
                 }
                 case NULL -> {
@@ -179,7 +229,7 @@ public final class JsonKit {
                 case NUMBER -> {
                     checkExpectToken(tokenType, expectToken);
                     if (tokenValue.contains(".") || tokenValue.contains("e") || tokenValue.contains("E")) {
-                        jsonObject.put(key, Double.valueOf(tokenValue));
+                        jsonObject.put(key, Double.parseDouble(tokenValue));
                     } else {
                         long num = Long.parseLong(tokenValue);
                         if (num > Integer.MAX_VALUE || num < Integer.MIN_VALUE) {
@@ -192,16 +242,11 @@ public final class JsonKit {
                 }
                 case BOOLEAN -> {
                     checkExpectToken(tokenType, expectToken);
-                    jsonObject.put(key, Boolean.valueOf(token.value()));
+                    jsonObject.put(key, "true".equals(token.value()) ? Boolean.TRUE : Boolean.FALSE);
                     expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_OBJECT.getTokenCode();
                 }
                 case STRING -> {
                     checkExpectToken(tokenType, expectToken);
-                    int index = tokens.indexOf(token);
-                    if (index < 1) {
-                        throw new RuntimeException("Parse error, invalid Token.");
-                    }
-                    Token previousToken = tokens.get(index - 1);
                     if (previousToken.tokenType() == TokenType.SEP_COLON) {
                         jsonObject.put(key, token.value());
                         expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_OBJECT.getTokenCode();
@@ -212,7 +257,9 @@ public final class JsonKit {
                 }
                 case SEP_COLON -> {
                     checkExpectToken(tokenType, expectToken);
-                    expectToken = TokenType.NULL.getTokenCode() | TokenType.NUMBER.getTokenCode() | TokenType.BOOLEAN.getTokenCode() | TokenType.STRING.getTokenCode() | TokenType.BEGIN_OBJECT.getTokenCode() | TokenType.BEGIN_ARRAY.getTokenCode();
+                    expectToken = TokenType.NULL.getTokenCode() | TokenType.NUMBER.getTokenCode()
+                            | TokenType.BOOLEAN.getTokenCode() | TokenType.STRING.getTokenCode()
+                            | TokenType.BEGIN_OBJECT.getTokenCode() | TokenType.BEGIN_ARRAY.getTokenCode();
                 }
                 case SEP_COMMA -> {
                     checkExpectToken(tokenType, expectToken);
@@ -220,13 +267,17 @@ public final class JsonKit {
                 }
                 default -> throw new RuntimeException("Unexpected Token.");
             }
+            previousToken = token;
         }
         throw new RuntimeException("Parse error, invalid Token.");
     }
 
-    private static List<Object> parseJsonArray(Iterator<Token> tokenIterator, List<Token> tokens) {
-        final List<Object> jsonArray = new ArrayList<>();
-        int expectToken = TokenType.BEGIN_OBJECT.getTokenCode() | TokenType.END_ARRAY.getTokenCode() | TokenType.END_OBJECT.getTokenCode() | TokenType.NULL.getTokenCode() | TokenType.NUMBER.getTokenCode() | TokenType.BOOLEAN.getTokenCode() | TokenType.STRING.getTokenCode();
+    private static List<Object> parseJsonArray(Iterator<Token> tokenIterator) {
+        final List<Object> jsonArray = new LinkedList<>();
+        int expectToken = TokenType.BEGIN_OBJECT.getTokenCode() | TokenType.BEGIN_ARRAY.getTokenCode()
+                | TokenType.END_ARRAY.getTokenCode() | TokenType.END_OBJECT.getTokenCode()
+                | TokenType.NULL.getTokenCode() | TokenType.NUMBER.getTokenCode()
+                | TokenType.BOOLEAN.getTokenCode() | TokenType.STRING.getTokenCode();
         while (tokenIterator.hasNext()) {
             Token token = tokenIterator.next();
             TokenType tokenType = token.tokenType();
@@ -234,12 +285,12 @@ public final class JsonKit {
             switch (tokenType) {
                 case BEGIN_OBJECT -> {
                     checkExpectToken(tokenType, expectToken);
-                    jsonArray.add(parseJsonObject(tokenIterator, tokens));
+                    jsonArray.add(parseJsonObject(tokenIterator));
                     expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_ARRAY.getTokenCode();
                 }
                 case BEGIN_ARRAY -> {
                     checkExpectToken(tokenType, expectToken);
-                    jsonArray.add(parseJsonArray(tokenIterator, tokens));
+                    jsonArray.add(parseJsonArray(tokenIterator));
                     expectToken = TokenType.SEP_COMMA.getTokenCode() | TokenType.END_ARRAY.getTokenCode();
                 }
                 case END_ARRAY, END_DOCUMENT -> {
@@ -256,7 +307,7 @@ public final class JsonKit {
                     if (tokenValue.contains(".") || tokenValue.contains("e") || tokenValue.contains("E")) {
                         jsonArray.add(Double.valueOf(tokenValue));
                     } else {
-                        long num = Long.parseLong(tokenValue);
+                        long num = Long.parseLong(tokenValue.trim());
                         if (num > Integer.MAX_VALUE || num < Integer.MIN_VALUE) {
                             jsonArray.add(num);
                         } else {
@@ -310,10 +361,68 @@ public final class JsonKit {
         return ((ch >= '0' && ch <= '9') || ('a' <= ch && ch <= 'f') || ('A' <= ch && ch <= 'F'));
     }
 
+    private static int encodeUTF8_UTF16(byte[] val, byte[] dst) throws Throwable {
+        int dp = 0;
+        int sp = 0;
+        int sl = val.length >> 1;
+        while (sp < sl) {
+            // ascii fast loop;
+            char c = (char) getChar.invoke(val, sp);
+            if (c >= '\u0080') {
+                break;
+            }
+            dst[dp++] = (byte) c;
+            sp++;
+        }
+        while (sp < sl) {
+            char c = (char) getChar.invoke(val, sp++);
+            if (c < 0x80) {
+                dst[dp++] = (byte) c;
+            } else if (c < 0x800) {
+                dst[dp++] = (byte) (0xc0 | (c >> 6));
+                dst[dp++] = (byte) (0x80 | (c & 0x3f));
+            } else if (Character.isSurrogate(c)) {
+                int uc = -1;
+                char c2;
+                if (Character.isHighSurrogate(c) && sp < sl &&
+                        Character.isLowSurrogate(c2 = (char) getChar.invoke(val, sp))) {
+                    uc = Character.toCodePoint(c, c2);
+                }
+                if (uc < 0) {
+                    dst[dp++] = '?';
+                } else {
+                    dst[dp++] = (byte) (0xf0 | ((uc >> 18)));
+                    dst[dp++] = (byte) (0x80 | ((uc >> 12) & 0x3f));
+                    dst[dp++] = (byte) (0x80 | ((uc >> 6) & 0x3f));
+                    dst[dp++] = (byte) (0x80 | (uc & 0x3f));
+                    sp++;  // 2 chars
+                }
+            } else {
+                // 3 bytes, 16 bits
+                dst[dp++] = (byte) (0xe0 | ((c >> 12)));
+                dst[dp++] = (byte) (0x80 | ((c >> 6) & 0x3f));
+                dst[dp++] = (byte) (0x80 | (c & 0x3f));
+            }
+        }
+        return dp;
+    }
+
     private static void checkExpectToken(TokenType tokenType, int expectToken) {
         if ((tokenType.getTokenCode() & expectToken) == 0) {
             throw new RuntimeException("Parse error, invalid Token.");
         }
+    }
+
+    private static class staticTokenHolder {
+        static final Token BEGIN_OBJECT_TOKEN = new Token(TokenType.BEGIN_OBJECT, "{");
+        static final Token END_OBJECT_TOKEN = new Token(TokenType.END_OBJECT, "}");
+        static final Token BEGIN_ARRAY_TOKEN = new Token(TokenType.BEGIN_ARRAY, "[");
+        static final Token END_ARRAY_TOKEN = new Token(TokenType.END_ARRAY, "]");
+        static final Token SEP_COMMA_TOKEN = new Token(TokenType.SEP_COMMA, ",");
+        static final Token SEP_COLON_TOKEN = new Token(TokenType.SEP_COLON, ":");
+        static final Token NULL_TOKEN = new Token(TokenType.NULL, "null");
+        static final Token BOOLEAN_TRUE_TOKEN = new Token(TokenType.BOOLEAN, "true");
+        static final Token BOOLEAN_FALSE_TOKEN = new Token(TokenType.BOOLEAN, "false");
     }
 
     private record Token(TokenType tokenType, String value) {

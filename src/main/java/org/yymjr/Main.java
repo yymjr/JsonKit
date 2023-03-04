@@ -1,15 +1,20 @@
 package org.yymjr;
 
-import org.yymjr.util.JsonKit;
-
-import java.util.*;
+import org.openjdk.jmh.runner.Runner;
+import org.openjdk.jmh.runner.RunnerException;
+import org.openjdk.jmh.runner.options.Options;
+import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 public class Main {
 
-    public static void main(String[] args) {
-        final String data = "{\"name\": \"杨xiao\",\"age\": 43,\"address\": {\"street\": \"10 Downing Street\",\"city\": \"London\"},\"phones\": [\"+44 1234567\",\"+44 2345678\"],\"ss\":true}";
-        Map<String, Object> jsonObject = JsonKit.toJsonObject(data);
-        System.out.println(jsonObject);
+    public static void main(String[] args) throws RunnerException {
+        Options options = new OptionsBuilder()
+                .include(JsonBenchmark.class.getSimpleName())
+                .exclude("fast")
+                .forks(1)
+                .jvmArgs("-Xmx1024m", "-XX:+HeapDumpOnOutOfMemoryError")
+                .build();
+        new Runner(options).run();
     }
 
 }
