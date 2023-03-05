@@ -3,11 +3,15 @@ plugins {
     id 'application'
 }
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(18))
+    }
+}
+
 application {
     mainClass = 'org.yymjr.Main'
 }
-
-//applicationDefaultJvmArgs = ['-Xmx512m', '-XX:+HeapDumpOnOutOfMemoryError']
 
 group 'org.yymjr'
 version '1.0-SNAPSHOT'

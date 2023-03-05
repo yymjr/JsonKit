@@ -1,6 +1,7 @@
 package org.yymjr;
 
 import com.alibaba.fastjson2.JSONObject;
+import okio.BufferedSource;
 import okio.Okio;
 import org.openjdk.jmh.annotations.*;
 import org.yymjr.util.JsonKit;
@@ -15,35 +16,52 @@ import java.util.concurrent.TimeUnit;
 public class JsonBenchmark {
     @Param({"10"})
     public int size;
-    public String latin1Data;
-    public String utf16Data;
+    String latin1File = "/home/ec2-user/gsoc-2018.json";
+    String utf16File = "/home/ec2-user/fgo.json";
 
     @Setup(Level.Invocation)
-    public void setup() {
+    public void setUp() {
+        String os = System.getProperty("os.name");
+        if (os.contains("Mac")) {
+            latin1File = "/Users/yymjr/Downloads/gsoc-2018.json";
+            utf16File = "/Users/yymjr/Downloads/fgo.json";
+        } else {
+            latin1File = "/home/ec2-user/gsoc-2018.json";
+            utf16File = "/home/ec2-user/fgo.json";
+        }
+    }
+
+    @Benchmark
+    public void jsonKitLatin1() throws IOException {
+        BufferedSource jsonKitLatin1Source = Okio.buffer(Okio.source(new File(latin1File)));
+        JsonKit.toJsonObject(jsonKitLatin1Source);
+        jsonKitLatin1Source.close();
+    }
+
+    @Benchmark
+    public void fastJsonLatin1() {
         try {
-            latin1Data = Okio.buffer(Okio.source(new File("/Users/yymjr/Downloads/gsoc-2018.json"))).readUtf8();
-            utf16Data = Okio.buffer(Okio.source(new File("/Users/yymjr/Downloads/fgo.json"))).readUtf8();
+            BufferedSource fastJsonLatin1Source = Okio.buffer(Okio.source(new File(latin1File)));
+            JSONObject.parseObject(fastJsonLatin1Source.readUtf8());
+            fastJsonLatin1Source.close();
         } catch (IOException ignored) {
         }
     }
 
     @Benchmark
-    public void jsonKitLatin1() {
-        JsonKit.toJsonObject(latin1Data);
-    }
-
-    @Benchmark
-    public void fastJsonLatin1() {
-        JSONObject.parseObject(latin1Data);
-    }
-
-    @Benchmark
-    public void jsonKitUtf16() {
-        JsonKit.toJsonObject(utf16Data);
+    public void jsonKitUtf16() throws IOException {
+        BufferedSource jsonKitUtf16Source = Okio.buffer(Okio.source(new File(utf16File)));
+        JsonKit.toJsonObject(jsonKitUtf16Source);
+        jsonKitUtf16Source.close();
     }
 
     @Benchmark
     public void fastJsonUtf16() {
-        JSONObject.parseObject(utf16Data);
+        try {
+            BufferedSource fastJsonUtf16Source = Okio.buffer(Okio.source(new File(utf16File)));
+            JSONObject.parseObject(fastJsonUtf16Source.readUtf8());
+            fastJsonUtf16Source.close();
+        } catch (IOException ignored) {
+        }
     }
 }
