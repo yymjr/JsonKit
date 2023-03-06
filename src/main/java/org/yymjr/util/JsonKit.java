@@ -4,7 +4,12 @@ import okio.BufferedSource;
 import sun.misc.Unsafe;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
@@ -14,33 +19,30 @@ public final class JsonKit {
     private static final byte[] fc = {'a', 'l', 's', 'e'};
     static final byte LATIN1 = 0;
     static final byte UTF16 = 1;
-    private static final Unsafe UNSAFE;
-    private static long FIELD_STRING_VALUE_OFFSET;
-    private static long FIELD_STRING_CODER_OFFSET;
-    private static int HI_BYTE_SHIFT;
-    private static int LO_BYTE_SHIFT;
+    private static final VarHandle valueVarHandle;
+    private static final VarHandle coderVarHandle;
+    private static final MethodHandle newStringNoRepl1;
+    private static final MethodHandle isASCII;
+    private static final MethodHandle getChar;
 
     static {
-        Unsafe unsafe = null;
         try {
             Field theUnsafeField = Unsafe.class.getDeclaredField("theUnsafe");
             theUnsafeField.setAccessible(true);
-            unsafe = (Unsafe) theUnsafeField.get(null);
-            Field field = String.class.getDeclaredField("value");
-            FIELD_STRING_VALUE_OFFSET = unsafe.objectFieldOffset(field);
-            field = String.class.getDeclaredField("coder");
-            FIELD_STRING_CODER_OFFSET = unsafe.objectFieldOffset(field);
+            Unsafe unsafe = (Unsafe) theUnsafeField.get(null);
 
+            Field field = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
+            long fieldImplLookUpOffset = unsafe.staticFieldOffset(field);
+            MethodHandles.Lookup implLoopUp = (MethodHandles.Lookup) unsafe.getObject(MethodHandles.Lookup.class, fieldImplLookUpOffset);
+            newStringNoRepl1 = implLoopUp.findStatic(String.class, "newStringNoRepl1", MethodType.methodType(String.class, byte[].class, Charset.class));
+            valueVarHandle = implLoopUp.findVarHandle(String.class, "value", byte[].class);
+            coderVarHandle = implLoopUp.findVarHandle(String.class, "coder", byte.class);
+            isASCII = implLoopUp.findStatic(String.class, "isASCII", MethodType.methodType(boolean.class, byte[].class));
             Class<?> StringUTF16Clazz = Class.forName("java.lang.StringUTF16");
-            field = StringUTF16Clazz.getDeclaredField("HI_BYTE_SHIFT");
-            long HI_BYTE_SHIFT_OFFSET = unsafe.staticFieldOffset(field);
-            HI_BYTE_SHIFT = unsafe.getInt(StringUTF16Clazz, HI_BYTE_SHIFT_OFFSET);
-            field = StringUTF16Clazz.getDeclaredField("LO_BYTE_SHIFT");
-            long LO_BYTE_SHIFT_OFFSET = unsafe.staticFieldOffset(field);
-            LO_BYTE_SHIFT = unsafe.getInt(StringUTF16Clazz, LO_BYTE_SHIFT_OFFSET);
+            getChar = implLoopUp.findStatic(StringUTF16Clazz, "getChar", MethodType.methodType(char.class, byte[].class, int.class));
         } catch (Throwable ignored) {
+            throw new RuntimeException();
         }
-        UNSAFE = unsafe;
     }
 
     public static Map<String, Object> toJsonObject(BufferedSource source) {
@@ -57,9 +59,9 @@ public final class JsonKit {
     }
 
     public static Map<String, Object> toJsonObject(String src) {
-        byte[] value = (byte[]) UNSAFE.getObject(src, FIELD_STRING_VALUE_OFFSET);
-        byte codec = UNSAFE.getByte(src, FIELD_STRING_CODER_OFFSET);
-        if (codec == UTF16) {
+        byte[] value = (byte[]) valueVarHandle.get(src);
+        byte coder = (byte) coderVarHandle.get(src);
+        if (coder == UTF16) {
             byte[] utf8Val;
             int dp;
             try {
@@ -70,7 +72,7 @@ public final class JsonKit {
                 dp = utf8Val.length;
             }
             return toJsonObject(utf8Val, dp);
-        } else if (codec == LATIN1) {
+        } else if (coder == LATIN1) {
             return toJsonObject(value, value.length);
         } else {
             throw new IllegalArgumentException();
@@ -81,7 +83,7 @@ public final class JsonKit {
         final IntBuffer tokens = new IntBuffer();
         for (int i = 0; i < length; i++) {
             byte code = value[i];
-            if (isWhiteSpace(code)) {
+            if (code == ' ' || code == '\t' || code == '\r' || code == '\n') {
                 continue;
             }
             switch (code) {
@@ -130,7 +132,7 @@ public final class JsonKit {
                             if (code == 'u') {
                                 for (int j = 0; j < 4; j++) {
                                     code = value[++i];
-                                    if (!isHex(code)) {
+                                    if (!((code >= '0' && code <= '9') || ('a' <= code && code <= 'f') || ('A' <= code && code <= 'F'))) {
                                         throw new RuntimeException("Illegal character");
                                     }
                                 }
@@ -186,16 +188,11 @@ public final class JsonKit {
     }
 
     private static String quickCreateString(byte[] value, int from, int to) {
-        int len = to - from;
         try {
-            if (!hasNegatives(value, from, len)) {
-                byte[] copy = Arrays.copyOfRange(value, from, to);
-                String dst = (String) UNSAFE.allocateInstance(String.class);
-                UNSAFE.putObject(dst, FIELD_STRING_VALUE_OFFSET, copy);
-                UNSAFE.putByte(dst, FIELD_STRING_CODER_OFFSET, LATIN1);
-                return dst;
-            }
-            return new String(value, from, len, StandardCharsets.UTF_8);
+            byte[] copy = Arrays.copyOfRange(value, from, to);
+            Charset charset = (boolean) isASCII.invoke(copy) ?
+                    StandardCharsets.US_ASCII : StandardCharsets.UTF_8;
+            return (String) newStringNoRepl1.invoke(copy, charset);
         } catch (Throwable ignored) {
             throw new IllegalArgumentException();
         }
@@ -348,10 +345,6 @@ public final class JsonKit {
         throw new RuntimeException("Parse error, invalid Token.");
     }
 
-    private static boolean isWhiteSpace(byte ch) {
-        return (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n');
-    }
-
     private static boolean compareWith(byte[] dst, byte[] src, int offset) {
         if (dst.length + offset > src.length) {
             return false;
@@ -365,26 +358,13 @@ public final class JsonKit {
         return true;
     }
 
-    private static boolean isHex(byte ch) {
-        return ((ch >= '0' && ch <= '9') || ('a' <= ch && ch <= 'f') || ('A' <= ch && ch <= 'F'));
-    }
-
-    private static boolean hasNegatives(byte[] ba, int off, int len) {
-        for (int i = off, limit = off + len; i < limit; i++) {
-            if (ba[i] < 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static int encodeUTF8_UTF16(byte[] val, byte[] dst) {
+    private static int encodeUTF8_UTF16(byte[] val, byte[] dst) throws Throwable {
         int dp = 0;
         int sp = 0;
         int sl = val.length >> 1;
         while (sp < sl) {
             // ascii fast loop;
-            char c = getChar(val, sp);
+            char c = (char) getChar.invoke(val, sp);
             if (c >= '\u0080') {
                 break;
             }
@@ -392,7 +372,7 @@ public final class JsonKit {
             sp++;
         }
         while (sp < sl) {
-            char c = getChar(val, sp++);
+            char c = (char) getChar.invoke(val, sp++);
             if (c < 0x80) {
                 dst[dp++] = (byte) c;
             } else if (c < 0x800) {
@@ -401,7 +381,7 @@ public final class JsonKit {
             } else if (Character.isSurrogate(c)) {
                 int uc = -1;
                 char c2;
-                if (Character.isHighSurrogate(c) && sp < sl && Character.isLowSurrogate(c2 = getChar(val, sp))) {
+                if (Character.isHighSurrogate(c) && sp < sl && Character.isLowSurrogate(c2 = (char) getChar.invoke(val, sp))) {
                     uc = Character.toCodePoint(c, c2);
                 }
                 if (uc < 0) {
@@ -423,18 +403,13 @@ public final class JsonKit {
         return dp;
     }
 
-    static char getChar(byte[] val, int index) {
-        index <<= 1;
-        return (char) (((val[index++] & 0xff) << HI_BYTE_SHIFT) | ((val[index] & 0xff) << LO_BYTE_SHIFT));
-    }
-
     private static void checkExpectToken(int tokenType, int expectToken) {
         if ((tokenType & expectToken) == 0) {
             throw new RuntimeException("Parse error, invalid Token.");
         }
     }
 
-    private static class TokenType {
+    private static final class TokenType {
         private static final int BEGIN_OBJECT = 1;
         private static final int END_OBJECT = 1 << 1;
         private static final int BEGIN_ARRAY = 1 << 2;
@@ -484,9 +459,10 @@ public final class JsonKit {
             return current.next();
         }
 
-        private static class Segment {
+        private static final class Segment {
             private static final int SIZE = 1024 * 64;
             private final int[] buffer;
+            private static final VarHandle AA = MethodHandles.arrayElementVarHandle(int[].class);
             private int writeIndex = 0;
             private int readIndex = 0;
             private Segment next = null;
@@ -500,7 +476,7 @@ public final class JsonKit {
             }
 
             public int next() {
-                return buffer[readIndex++];
+                return (int) AA.get(buffer, readIndex++);
             }
 
             public boolean canWrite() {
@@ -508,7 +484,7 @@ public final class JsonKit {
             }
 
             public void add(int val) {
-                buffer[writeIndex++] = val;
+                AA.setRelease(buffer, writeIndex++, val);
             }
         }
     }
