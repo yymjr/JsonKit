@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 public class JsonBenchmark {
-    @Param({"10", "1000", "100000"})
+    @Param({"10", "1000"})
     public int size;
     String latin1File = "/home/ec2-user/gsoc-2018.json";
     String utf16File = "/home/ec2-user/fgo.json";

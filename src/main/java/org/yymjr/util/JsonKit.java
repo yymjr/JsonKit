@@ -9,8 +9,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class JsonKit {
@@ -23,7 +21,7 @@ public final class JsonKit {
     private static final VarHandle valueVarHandle;
     private static final VarHandle coderVarHandle;
     private static final MethodHandle newString;
-    private static final MethodHandle newStringNoRepl1;
+    private static final MethodHandle newStringUTF8NoRepl;
 
     static {
         try {
@@ -35,7 +33,7 @@ public final class JsonKit {
             long fieldImplLookUpOffset = unsafe.staticFieldOffset(field);
             MethodHandles.Lookup implLoopUp = (MethodHandles.Lookup) unsafe.getObject(MethodHandles.Lookup.class, fieldImplLookUpOffset);
             newString = implLoopUp.findConstructor(String.class, MethodType.methodType(void.class, byte[].class, byte.class));
-            newStringNoRepl1 = implLoopUp.findStatic(String.class, "newStringNoRepl1", MethodType.methodType(String.class, byte[].class, Charset.class));
+            newStringUTF8NoRepl = implLoopUp.findStatic(String.class, "newStringUTF8NoRepl", MethodType.methodType(String.class, byte[].class, int.class, int.class));
             valueVarHandle = implLoopUp.findVarHandle(String.class, "value", byte[].class);
             coderVarHandle = implLoopUp.findVarHandle(String.class, "coder", byte.class);
         } catch (Throwable ignored) {
@@ -171,10 +169,10 @@ public final class JsonKit {
 
     private static String quickCreateString(ByteArrayStream stream, int from, int to) {
         try {
-            byte[] copy = Arrays.copyOfRange(stream.val, from, to);
             if (stream.coder == UTF8) {
-                return (String) newStringNoRepl1.invoke(copy, StandardCharsets.UTF_8);
+                return (String) newStringUTF8NoRepl.invoke(stream.val, from, to - from);
             } else {
+                byte[] copy = Arrays.copyOfRange(stream.val, from, to);
                 return (String) newString.invoke(copy, stream.coder);
             }
         } catch (Throwable ignored) {
@@ -204,7 +202,7 @@ public final class JsonKit {
                 case TokenType.NULL -> jsonObject.put(key, null);
                 case TokenType.NUMBER -> {
                     String tokenValue = quickCreateString(stream, tokens.next(), tokens.next());
-                    if (tokenValue.contains(".") || tokenValue.contains("e") || tokenValue.contains("E")) {
+                    if (contains(tokenValue)) {
                         jsonObject.put(key, Double.parseDouble(tokenValue));
                     } else {
                         long num = Long.parseLong(tokenValue);
@@ -233,6 +231,26 @@ public final class JsonKit {
             previousToken = tokenType;
         }
         throw new RuntimeException("Parse error, invalid Token.");
+    }
+
+    private static boolean contains(String number) {
+        byte[] value = (byte[]) valueVarHandle.get(number);
+        byte coder = (byte) coderVarHandle.get(number);
+        int dp = 0;
+        int sl = value.length;
+        while (dp < sl) {
+            byte b0 = value[dp++];
+            if (coder == UTF16) {
+                byte b1 = value[dp++];
+                if (b1 != 0) {
+                    continue;
+                }
+            }
+            if (b0 == '.' || b0 == 'e' || b0 == 'E') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<Object> parseJsonArray(ByteArrayStream stream, IntBuffer tokens) {
@@ -350,7 +368,7 @@ public final class JsonKit {
         private static final int END_DOCUMENT = 1 << 10;
     }
 
-    private final static class IntBuffer {
+    private static final class IntBuffer {
         private final Segment head;
         private Segment current;
 
@@ -359,13 +377,11 @@ public final class JsonKit {
         }
 
         public void add(int val) {
-            if (current.canWrite()) {
-                current.add(val);
-            } else {
+            if (!current.canWrite()) {
                 current.next = new Segment();
                 current = current.next;
-                current.add(val);
             }
+            current.add(val);
         }
 
         public void flip() {
@@ -389,7 +405,6 @@ public final class JsonKit {
         private static final class Segment {
             private static final int SIZE = 1024 * 64;
             private final int[] buffer;
-            private static final VarHandle AA = MethodHandles.arrayElementVarHandle(int[].class);
             private int writeIndex = 0;
             private int readIndex = 0;
             private Segment next = null;
@@ -403,7 +418,7 @@ public final class JsonKit {
             }
 
             public int next() {
-                return (int) AA.get(buffer, readIndex++);
+                return buffer[readIndex++];
             }
 
             public boolean canWrite() {
@@ -411,7 +426,7 @@ public final class JsonKit {
             }
 
             public void add(int val) {
-                AA.setRelease(buffer, writeIndex++, val);
+                buffer[writeIndex++] = val;
             }
         }
     }
