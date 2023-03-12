@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 public class JsonBenchmark {
-    @Param({"10"})
+    @Param({"10", "1000", "100000"})
     public int size;
     String latin1File = "/home/ec2-user/gsoc-2018.json";
     String utf16File = "/home/ec2-user/fgo.json";
@@ -34,7 +34,7 @@ public class JsonBenchmark {
     @Benchmark
     public void jsonKitLatin1() throws IOException {
         BufferedSource jsonKitLatin1Source = Okio.buffer(Okio.source(new File(latin1File)));
-        JsonKit.toJsonObject(jsonKitLatin1Source);
+        JsonKit.toJsonObject(jsonKitLatin1Source, JsonKit.LATIN1);
         jsonKitLatin1Source.close();
     }
 
@@ -51,7 +51,7 @@ public class JsonBenchmark {
     @Benchmark
     public void jsonKitUtf16() throws IOException {
         BufferedSource jsonKitUtf16Source = Okio.buffer(Okio.source(new File(utf16File)));
-        JsonKit.toJsonObject(jsonKitUtf16Source);
+        JsonKit.toJsonObject(jsonKitUtf16Source, JsonKit.UTF8);
         jsonKitUtf16Source.close();
     }
 
